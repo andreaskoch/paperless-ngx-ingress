@@ -1,0 +1,207 @@
+package main
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func TestGetOrCreateEntity_ExistingEntity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(map[string]any{
+				"count": 1,
+				"results": []map[string]any{
+					{"id": 42, "name": "Test Corp"},
+				},
+			})
+			return
+		}
+		t.Fatal("unexpected request method:", r.Method)
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	id, err := client.GetOrCreateEntity("correspondents", "Test Corp", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != 42 {
+		t.Fatalf("expected id 42, got %d", id)
+	}
+}
+
+func TestGetOrCreateEntity_CreateNew(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(map[string]any{
+				"count":   0,
+				"results": []map[string]any{},
+			})
+			return
+		}
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{
+				"id":   99,
+				"name": "New Entity",
+			})
+			return
+		}
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	id, err := client.GetOrCreateEntity("correspondents", "New Entity", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != 99 {
+		t.Fatalf("expected id 99, got %d", id)
+	}
+	if callCount != 2 {
+		t.Fatalf("expected 2 calls (GET + POST), got %d", callCount)
+	}
+}
+
+func TestGetOrCreateEntity_WithExtraFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(map[string]any{
+				"count":   0,
+				"results": []map[string]any{},
+			})
+			return
+		}
+		if r.Method == http.MethodPost {
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			if body["path"] != "/{Recipient}/{{ created_year }}/{{ correspondent }}/{{ title }}" {
+				t.Fatalf("expected path field in POST body, got: %v", body)
+			}
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{
+				"id":   10,
+				"name": "My Company",
+			})
+			return
+		}
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	extra := map[string]string{
+		"path": "/{Recipient}/{{ created_year }}/{{ correspondent }}/{{ title }}",
+	}
+	id, err := client.GetOrCreateEntity("storage_paths", "My Company", extra)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != 10 {
+		t.Fatalf("expected id 10, got %d", id)
+	}
+}
+
+func TestGetOrCreateEntity_AuthHeader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth != "Token my-secret" {
+			t.Fatalf("expected 'Token my-secret', got %q", auth)
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"count":   1,
+			"results": []map[string]any{{"id": 1, "name": "x"}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "my-secret")
+	_, err := client.GetOrCreateEntity("tags", "x", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestGetOrCreateEntity_APIError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("internal error"))
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	_, err := client.GetOrCreateEntity("correspondents", "Test", nil)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("expected error to contain status code, got: %v", err)
+	}
+}
+
+func TestGetOrCreateCustomField_Existing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"count": 2,
+			"results": []map[string]any{
+				{"id": 5, "name": "ShortSummary", "data_type": "longtext"},
+				{"id": 6, "name": "LongSummary", "data_type": "longtext"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	id, err := client.GetOrCreateCustomField("ShortSummary", "longtext")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != 5 {
+		t.Fatalf("expected id 5, got %d", id)
+	}
+}
+
+func TestGetOrCreateCustomField_CreateNew(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(map[string]any{
+				"count":   0,
+				"results": []map[string]any{},
+			})
+			return
+		}
+		if r.Method == http.MethodPost {
+			var body map[string]string
+			json.NewDecoder(r.Body).Decode(&body)
+			if body["name"] != "Amounts" {
+				t.Fatalf("expected name 'Amounts', got %q", body["name"])
+			}
+			if body["data_type"] != "longtext" {
+				t.Fatalf("expected data_type 'longtext', got %q", body["data_type"])
+			}
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{
+				"id":        12,
+				"name":      "Amounts",
+				"data_type": "longtext",
+			})
+			return
+		}
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	id, err := client.GetOrCreateCustomField("Amounts", "longtext")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != 12 {
+		t.Fatalf("expected id 12, got %d", id)
+	}
+}
