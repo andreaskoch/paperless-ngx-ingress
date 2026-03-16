@@ -37,7 +37,6 @@ func (r *DocumentRequest) Validate() error {
 		value string
 	}
 	checks := []fieldCheck{
-		{"SHA256Hash", r.SHA256Hash},
 		{"Data", r.Data},
 		{"OriginalFilename", r.OriginalFilename},
 		{"FileType", r.FileType},

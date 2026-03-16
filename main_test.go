@@ -121,6 +121,52 @@ func TestHandleDocumentUpload_Success(t *testing.T) {
 	}
 }
 
+func TestHandleDocumentUpload_EmptySHA256(t *testing.T) {
+	// Same mock server as success test
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "tags") {
+			json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []map[string]any{}})
+			return
+		}
+		if r.Method == http.MethodGet && !strings.Contains(r.URL.Path, "custom_fields") && !strings.Contains(r.URL.Path, "documents") {
+			json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []map[string]any{}})
+			return
+		}
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "custom_fields") {
+			json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []map[string]any{}})
+			return
+		}
+		if r.Method == http.MethodPost && !strings.Contains(r.URL.Path, "post_document") {
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{"id": 1, "name": "created"})
+			return
+		}
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "post_document") {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode("task-uuid-456")
+			return
+		}
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+
+	data := []byte("test document content")
+	docReq := validRequest()
+	docReq.Data = base64.StdEncoding.EncodeToString(data)
+	docReq.SHA256Hash = "" // empty — should be auto-calculated
+
+	body, _ := json.Marshal(docReq)
+	req := httptest.NewRequest(http.MethodPost, "/api/documents", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handleDocumentUpload(w, req, client)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestHandleDocumentUpload_Duplicate(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "tags") {

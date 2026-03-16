@@ -18,7 +18,6 @@ func TestValidateDocumentRequest_MissingFields(t *testing.T) {
 		mutate  func(*DocumentRequest)
 		wantErr string
 	}{
-		{"missing SHA256Hash", func(r *DocumentRequest) { r.SHA256Hash = "" }, "SHA256Hash"},
 		{"missing Data", func(r *DocumentRequest) { r.Data = "" }, "Data"},
 		{"missing OriginalFilename", func(r *DocumentRequest) { r.OriginalFilename = "" }, "OriginalFilename"},
 		{"missing FileType", func(r *DocumentRequest) { r.FileType = "" }, "FileType"},

@@ -80,10 +80,12 @@ func handleDocumentUpload(w http.ResponseWriter, r *http.Request, client *Paperl
 		return
 	}
 
-	// Validate SHA256
+	// Compute SHA256 — use provided hash for validation, or calculate if empty
 	computed := sha256.Sum256(docData)
 	computedHex := fmt.Sprintf("%x", computed)
-	if computedHex != docReq.SHA256Hash {
+	if docReq.SHA256Hash == "" {
+		docReq.SHA256Hash = computedHex
+	} else if computedHex != docReq.SHA256Hash {
 		writeJSONError(w, "SHA256 hash mismatch", http.StatusBadRequest)
 		return
 	}
