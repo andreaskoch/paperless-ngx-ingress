@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"strconv"
 )
 
 type PaperlessClient struct {
@@ -164,4 +166,73 @@ func (c *PaperlessClient) GetOrCreateCustomField(name, dataType string) (int, er
 		return 0, fmt.Errorf("invalid id in created custom field")
 	}
 	return int(id), nil
+}
+
+// UploadParams contains all resolved IDs and data for uploading a document.
+type UploadParams struct {
+	DocumentData     []byte
+	OriginalFilename string
+	Title            string
+	Created          string
+	CorrespondentID  int
+	DocumentTypeID   int
+	StoragePathID    int
+	TagIDs           []int
+	CustomFields     map[string]any // field_id (as string) -> value
+}
+
+// UploadDocument uploads a document to Paperless NGX and returns the task UUID.
+func (c *PaperlessClient) UploadDocument(params UploadParams) (string, error) {
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	// Add document file
+	part, err := writer.CreateFormFile("document", params.OriginalFilename)
+	if err != nil {
+		return "", fmt.Errorf("creating form file: %w", err)
+	}
+	if _, err := part.Write(params.DocumentData); err != nil {
+		return "", fmt.Errorf("writing document data: %w", err)
+	}
+
+	// Add metadata fields
+	writer.WriteField("title", params.Title)
+	writer.WriteField("created", params.Created)
+	writer.WriteField("correspondent", strconv.Itoa(params.CorrespondentID))
+	writer.WriteField("document_type", strconv.Itoa(params.DocumentTypeID))
+	writer.WriteField("storage_path", strconv.Itoa(params.StoragePathID))
+
+	// Add tags — one form field per tag
+	for _, tagID := range params.TagIDs {
+		writer.WriteField("tags", strconv.Itoa(tagID))
+	}
+
+	// Add custom fields as JSON
+	if len(params.CustomFields) > 0 {
+		cfJSON, err := json.Marshal(params.CustomFields)
+		if err != nil {
+			return "", fmt.Errorf("marshaling custom fields: %w", err)
+		}
+		writer.WriteField("custom_fields", string(cfJSON))
+	}
+
+	writer.Close()
+
+	resp, err := c.doRequest(http.MethodPost, "/api/documents/post_document/", &buf, writer.FormDataContentType())
+	if err != nil {
+		return "", fmt.Errorf("uploading document: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("uploading document: status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Paperless returns a JSON-encoded UUID string
+	var taskID string
+	if err := json.NewDecoder(resp.Body).Decode(&taskID); err != nil {
+		return "", fmt.Errorf("decoding task ID: %w", err)
+	}
+	return taskID, nil
 }

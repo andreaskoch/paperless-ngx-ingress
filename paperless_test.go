@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -203,5 +206,110 @@ func TestGetOrCreateCustomField_CreateNew(t *testing.T) {
 	}
 	if id != 12 {
 		t.Fatalf("expected id 12, got %d", id)
+	}
+}
+
+func TestUploadDocument(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		if r.URL.Path != "/api/documents/post_document/" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+
+		mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil {
+			t.Fatalf("parsing content type: %v", err)
+		}
+		if !strings.HasPrefix(mediaType, "multipart/") {
+			t.Fatalf("expected multipart, got %s", mediaType)
+		}
+
+		reader := multipart.NewReader(r.Body, params["boundary"])
+		fields := map[string]string{}
+		var tagValues []string
+		var docContent []byte
+		var docFilename string
+		for {
+			part, err := reader.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("reading part: %v", err)
+			}
+			val, _ := io.ReadAll(part)
+			if part.FormName() == "document" {
+				docContent = val
+				docFilename = part.FileName()
+			} else if part.FormName() == "tags" {
+				tagValues = append(tagValues, string(val))
+			} else {
+				fields[part.FormName()] = string(val)
+			}
+		}
+
+		// Verify document content and filename
+		if string(docContent) != "hello pdf" {
+			t.Errorf("unexpected document content: %s", string(docContent))
+		}
+		if docFilename != "scan.pdf" {
+			t.Errorf("expected filename 'scan.pdf', got %q", docFilename)
+		}
+		if fields["title"] != "2026-01-01 Test Doc" {
+			t.Errorf("unexpected title: %s", fields["title"])
+		}
+		if fields["created"] != "2026-01-01" {
+			t.Errorf("unexpected created: %s", fields["created"])
+		}
+		if fields["correspondent"] != "1" {
+			t.Errorf("unexpected correspondent: %s", fields["correspondent"])
+		}
+		if fields["document_type"] != "2" {
+			t.Errorf("unexpected document_type: %s", fields["document_type"])
+		}
+		if fields["storage_path"] != "3" {
+			t.Errorf("unexpected storage_path: %s", fields["storage_path"])
+		}
+		if len(tagValues) != 2 {
+			t.Errorf("expected 2 tag values, got %d", len(tagValues))
+		}
+		// Verify custom_fields JSON
+		cfJSON := fields["custom_fields"]
+		if cfJSON == "" {
+			t.Error("custom_fields field is missing")
+		}
+		var cf map[string]any
+		if err := json.Unmarshal([]byte(cfJSON), &cf); err != nil {
+			t.Errorf("invalid custom_fields JSON: %v", err)
+		}
+		if cf["5"] != "de" {
+			t.Errorf("expected custom field 5='de', got %v", cf["5"])
+		}
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode("abc-123-uuid")
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	params := UploadParams{
+		DocumentData:     []byte("hello pdf"),
+		OriginalFilename: "scan.pdf",
+		Title:            "2026-01-01 Test Doc",
+		Created:          "2026-01-01",
+		CorrespondentID:  1,
+		DocumentTypeID:   2,
+		StoragePathID:    3,
+		TagIDs:           []int{10, 20},
+		CustomFields:     map[string]any{"5": "de", "6": "summary text"},
+	}
+	taskID, err := client.UploadDocument(params)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if taskID != "abc-123-uuid" {
+		t.Fatalf("expected task ID 'abc-123-uuid', got %q", taskID)
 	}
 }
