@@ -153,9 +153,11 @@ func handleDocumentUpload(w http.ResponseWriter, r *http.Request, client *Paperl
 		{"DocumentLanguageCode", "string", docReq.DocumentLanguageCode},
 		{"ShortSummary", "longtext", docReq.ShortSummary},
 		{"LongSummary", "longtext", docReq.LongSummary},
-		{"Amounts", "longtext", mustJSON(docReq.Amounts)},
 		{"RecipientDetails", "longtext", docReq.RecipientDetails},
 		{"CorrespondentDetails", "longtext", docReq.CorrespondentDetails},
+	}
+	if len(docReq.Amounts) > 0 {
+		fieldDefs = append(fieldDefs, customFieldDef{"Amounts", "longtext", mustJSON(docReq.Amounts)})
 	}
 
 	customFields := make(map[string]any)

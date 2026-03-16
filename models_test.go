@@ -31,8 +31,6 @@ func TestValidateDocumentRequest_MissingFields(t *testing.T) {
 		{"missing ShortSummary", func(r *DocumentRequest) { r.ShortSummary = "" }, "ShortSummary"},
 		{"missing LongSummary", func(r *DocumentRequest) { r.LongSummary = "" }, "LongSummary"},
 		{"missing ProposedFilename", func(r *DocumentRequest) { r.ProposedFilename = "" }, "ProposedFilename"},
-		{"missing Tags", func(r *DocumentRequest) { r.Tags = nil }, "Tags"},
-		{"missing Amounts", func(r *DocumentRequest) { r.Amounts = nil }, "Amounts"},
 	}
 
 	for _, tt := range tests {
@@ -70,6 +68,15 @@ func validRequest() DocumentRequest {
 			{Type: "Total", Amount: 100, CurrencyCode: "EUR"},
 		},
 		Tags: []string{"test", "invoice"},
+	}
+}
+
+func TestValidateDocumentRequest_EmptyTagsAndAmounts(t *testing.T) {
+	req := validRequest()
+	req.Tags = nil
+	req.Amounts = nil
+	if err := req.Validate(); err != nil {
+		t.Fatalf("expected no error with empty Tags/Amounts, got: %v", err)
 	}
 }
 

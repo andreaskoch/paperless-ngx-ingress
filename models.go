@@ -99,11 +99,5 @@ func (r *DocumentRequest) Validate() error {
 			return fmt.Errorf("missing required field: %s", c.name)
 		}
 	}
-	if len(r.Tags) == 0 {
-		return fmt.Errorf("missing required field: Tags")
-	}
-	if len(r.Amounts) == 0 {
-		return fmt.Errorf("missing required field: Amounts")
-	}
 	return nil
 }
