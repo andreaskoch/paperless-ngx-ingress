@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidateDocumentRequest_Valid(t *testing.T) {
@@ -21,7 +22,6 @@ func TestValidateDocumentRequest_MissingFields(t *testing.T) {
 		{"missing Data", func(r *DocumentRequest) { r.Data = "" }, "Data"},
 		{"missing OriginalFilename", func(r *DocumentRequest) { r.OriginalFilename = "" }, "OriginalFilename"},
 		{"missing FileType", func(r *DocumentRequest) { r.FileType = "" }, "FileType"},
-		{"missing DocumentDate", func(r *DocumentRequest) { r.DocumentDate = "" }, "DocumentDate"},
 		{"missing DocumentType", func(r *DocumentRequest) { r.DocumentType = "" }, "DocumentType"},
 		{"missing DocumentLanguageCode", func(r *DocumentRequest) { r.DocumentLanguageCode = "" }, "DocumentLanguageCode"},
 		{"missing Correspondent", func(r *DocumentRequest) { r.Correspondent = "" }, "Correspondent"},
@@ -70,5 +70,84 @@ func validRequest() DocumentRequest {
 			{Type: "Total", Amount: 100, CurrencyCode: "EUR"},
 		},
 		Tags: []string{"test", "invoice"},
+	}
+}
+
+func TestFillDateDefaults_AllSet(t *testing.T) {
+	r := DocumentRequest{DocumentDate: "2026-03-15", Year: "2026", Month: "03", Day: "15"}
+	r.FillDateDefaults(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	if r.DocumentDate != "2026-03-15" {
+		t.Fatalf("expected 2026-03-15, got %s", r.DocumentDate)
+	}
+}
+
+func TestFillDateDefaults_NoDateFields(t *testing.T) {
+	now := time.Date(2026, 3, 16, 0, 0, 0, 0, time.UTC)
+	r := DocumentRequest{}
+	r.FillDateDefaults(now)
+	if r.Year != "2026" {
+		t.Fatalf("expected year 2026, got %s", r.Year)
+	}
+	if r.Month != "03" {
+		t.Fatalf("expected month 03, got %s", r.Month)
+	}
+	// Day defaults to last day of month (March has 31 days)
+	if r.Day != "31" {
+		t.Fatalf("expected day 31, got %s", r.Day)
+	}
+	if r.DocumentDate != "2026-03-31" {
+		t.Fatalf("expected 2026-03-31, got %s", r.DocumentDate)
+	}
+}
+
+func TestFillDateDefaults_MissingDay(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	r := DocumentRequest{Year: "2026", Month: "02"}
+	r.FillDateDefaults(now)
+	// February 2026 has 28 days
+	if r.Day != "28" {
+		t.Fatalf("expected day 28, got %s", r.Day)
+	}
+	if r.DocumentDate != "2026-02-28" {
+		t.Fatalf("expected 2026-02-28, got %s", r.DocumentDate)
+	}
+}
+
+func TestFillDateDefaults_MissingYearAndMonth(t *testing.T) {
+	now := time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
+	r := DocumentRequest{Day: "15"}
+	r.FillDateDefaults(now)
+	if r.Year != "2026" {
+		t.Fatalf("expected year 2026, got %s", r.Year)
+	}
+	if r.Month != "07" {
+		t.Fatalf("expected month 07, got %s", r.Month)
+	}
+	if r.DocumentDate != "2026-07-15" {
+		t.Fatalf("expected 2026-07-15, got %s", r.DocumentDate)
+	}
+}
+
+func TestFillDateDefaults_DocumentDateOnly(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	r := DocumentRequest{DocumentDate: "2025-12-25"}
+	r.FillDateDefaults(now)
+	if r.Year != "2025" {
+		t.Fatalf("expected year 2025, got %s", r.Year)
+	}
+	if r.Month != "12" {
+		t.Fatalf("expected month 12, got %s", r.Month)
+	}
+	if r.Day != "25" {
+		t.Fatalf("expected day 25, got %s", r.Day)
+	}
+}
+
+func TestFillDateDefaults_LeapYear(t *testing.T) {
+	now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	r := DocumentRequest{Year: "2024", Month: "02"}
+	r.FillDateDefaults(now)
+	if r.Day != "29" {
+		t.Fatalf("expected day 29 (leap year), got %s", r.Day)
 	}
 }

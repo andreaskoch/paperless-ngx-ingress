@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -66,6 +67,9 @@ func handleDocumentUpload(w http.ResponseWriter, r *http.Request, client *Paperl
 		writeJSONError(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	// Fill date defaults before validation
+	docReq.FillDateDefaults(time.Now())
 
 	// Validate required fields
 	if err := docReq.Validate(); err != nil {
