@@ -265,7 +265,11 @@ func (c *PaperlessClient) CheckDuplicate(sha256Hash string) (bool, error) {
 	}
 
 	// Tag exists — check if any documents use it
-	tagID := int(paginated.Results[0]["id"].(float64))
+	idVal, ok := paginated.Results[0]["id"].(float64)
+	if !ok {
+		return false, fmt.Errorf("invalid id type in dedup tag response")
+	}
+	tagID := int(idVal)
 	docPath := fmt.Sprintf("/api/documents/?tags__id=%d", tagID)
 	resp2, err := c.doRequest(http.MethodGet, docPath, nil, "")
 	if err != nil {
