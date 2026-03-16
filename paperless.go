@@ -236,3 +236,52 @@ func (c *PaperlessClient) UploadDocument(params UploadParams) (string, error) {
 	}
 	return taskID, nil
 }
+
+// CheckDuplicate checks if a document with the given SHA256 hash already exists
+// by looking for a tag named "sha256:<hash>" that is assigned to at least one document.
+func (c *PaperlessClient) CheckDuplicate(sha256Hash string) (bool, error) {
+	tagName := "sha256:" + sha256Hash
+
+	// Search for the tag
+	searchPath := fmt.Sprintf("/api/tags/?name__iexact=%s", url.QueryEscape(tagName))
+	resp, err := c.doRequest(http.MethodGet, searchPath, nil, "")
+	if err != nil {
+		return false, fmt.Errorf("searching for dedup tag: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return false, fmt.Errorf("searching for dedup tag: status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var paginated paginatedResponse
+	if err := json.NewDecoder(resp.Body).Decode(&paginated); err != nil {
+		return false, fmt.Errorf("decoding tag search: %w", err)
+	}
+
+	if paginated.Count == 0 {
+		return false, nil
+	}
+
+	// Tag exists — check if any documents use it
+	tagID := int(paginated.Results[0]["id"].(float64))
+	docPath := fmt.Sprintf("/api/documents/?tags__id=%d", tagID)
+	resp2, err := c.doRequest(http.MethodGet, docPath, nil, "")
+	if err != nil {
+		return false, fmt.Errorf("checking documents for dedup tag: %w", err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp2.Body)
+		return false, fmt.Errorf("checking documents: status %d: %s", resp2.StatusCode, string(body))
+	}
+
+	var docResult paginatedResponse
+	if err := json.NewDecoder(resp2.Body).Decode(&docResult); err != nil {
+		return false, fmt.Errorf("decoding document search: %w", err)
+	}
+
+	return docResult.Count > 0, nil
+}

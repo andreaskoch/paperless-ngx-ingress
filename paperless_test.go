@@ -313,3 +313,54 @@ func TestUploadDocument(t *testing.T) {
 		t.Fatalf("expected task ID 'abc-123-uuid', got %q", taskID)
 	}
 }
+
+func TestCheckDuplicate_NoDuplicate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"count":   0,
+			"results": []map[string]any{},
+		})
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	exists, err := client.CheckDuplicate("abc123hash")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exists {
+		t.Fatal("expected no duplicate")
+	}
+}
+
+func TestCheckDuplicate_Found(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// First call: search for tag
+		if strings.Contains(r.URL.Path, "tags") {
+			json.NewEncoder(w).Encode(map[string]any{
+				"count": 1,
+				"results": []map[string]any{
+					{"id": 55, "name": "sha256:abc123hash"},
+				},
+			})
+			return
+		}
+		// Second call: search for documents with that tag
+		json.NewEncoder(w).Encode(map[string]any{
+			"count": 1,
+			"results": []map[string]any{
+				{"id": 100, "title": "existing doc"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	exists, err := client.CheckDuplicate("abc123hash")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !exists {
+		t.Fatal("expected duplicate to be found")
+	}
+}
