@@ -19,9 +19,9 @@ Accepts a JSON body describing a document with metadata and binary data (base64-
 | OriginalFilename | string | yes | Original filename of the scanned document |
 | FileType | string | yes | File extension (e.g. `pdf`) |
 | DocumentDate | string | yes | ISO date `YYYY-MM-DD` |
-| Year | string | yes | Year extracted from DocumentDate |
-| Month | string | yes | Month extracted from DocumentDate |
-| Day | string | yes | Day extracted from DocumentDate |
+| Year | string | no | Accepted but not used (derivable from DocumentDate) |
+| Month | string | no | Accepted but not used (derivable from DocumentDate) |
+| Day | string | no | Accepted but not used (derivable from DocumentDate) |
 | DocumentType | string | yes | Paperless document type name |
 | DocumentLanguageCode | string | yes | ISO language code (e.g. `de`) |
 | Correspondent | string | yes | Correspondent name |
@@ -38,7 +38,7 @@ Accepts a JSON body describing a document with metadata and binary data (base64-
 
 | Status | Meaning |
 |---|---|
-| 201 Created | Document uploaded successfully. Body contains `{"task_id": "..."}` from Paperless. |
+| 201 Created | Document accepted. Body: `{"task_id": "<uuid>"}`. Note: Paperless returns HTTP 200 with a bare UUID string; the ingress wraps it in JSON and returns 201. |
 | 400 Bad Request | Validation failure (missing fields, SHA256 mismatch, invalid base64). |
 | 409 Conflict | Document with this SHA256Hash already exists in Paperless. |
 | 502 Bad Gateway | Paperless NGX API returned an error. |
@@ -61,7 +61,7 @@ paperless-ngx-ingress/
 └── README.md
 ```
 
-Single-package monolith. All code in package `main`. No external framework — stdlib `net/http` only.
+Single-package monolith. All code in package `main`. No external framework — stdlib `net/http` only. One allowed dependency: `github.com/joho/godotenv` for `.env` file loading.
 
 ## Request Processing Flow
 
@@ -99,14 +99,16 @@ Entity resolution does not persist a cache across requests — each request quer
 
 ### Custom Fields
 
-| Field Name | Paperless Data Type | Source |
-|---|---|---|
-| DocumentLanguageCode | string | `DocumentLanguageCode` |
-| ShortSummary | string | `ShortSummary` |
-| LongSummary | text | `LongSummary` |
-| Amounts | json | `Amounts` array (stored as-is) |
-| RecipientDetails | string | `RecipientDetails` |
-| CorrespondentDetails | string | `CorrespondentDetails` |
+| Field Name | Paperless Data Type | Source | Notes |
+|---|---|---|---|
+| DocumentLanguageCode | string | `DocumentLanguageCode` | Max 128 chars; language codes are short |
+| ShortSummary | longtext | `ShortSummary` | Could exceed 128-char string limit |
+| LongSummary | longtext | `LongSummary` | Multi-line text |
+| Amounts | longtext | `Amounts` array | JSON-serialized string (no native json type in Paperless) |
+| RecipientDetails | longtext | `RecipientDetails` | Addresses can exceed 128 chars |
+| CorrespondentDetails | longtext | `CorrespondentDetails` | Addresses can exceed 128 chars |
+
+Valid Paperless custom field data types: `string` (max 128 chars), `url`, `date`, `boolean`, `integer`, `float`, `monetary`, `documentlink`, `select`, `longtext`.
 
 Custom fields are auto-created if they don't exist in Paperless.
 
@@ -117,27 +119,29 @@ Custom fields are auto-created if they don't exist in Paperless.
 All entity types (correspondents, document_types, storage_paths, tags) follow the same pattern:
 
 1. `GET /api/<entity_type>/?name__iexact=<name>` — search by exact name (case-insensitive)
-2. If found, return the existing ID
+2. Parse the paginated response (`{"count": N, "results": [...]}`) and return the existing ID if found
 3. If not found, `POST /api/<entity_type>/` with `{name: "..."}` (plus `path` for storage paths)
+
+Note: All Paperless list endpoints return paginated responses. For `name__iexact` queries, results fit in one page, but the JSON structure must be parsed correctly.
 
 ### Custom Fields
 
 1. `GET /api/custom_fields/` — list all custom fields
 2. Find by name match
-3. If not found, `POST /api/custom_fields/` with `{name, data_type}` where data_type is `string`, `text`, or `json`
+3. If not found, `POST /api/custom_fields/` with `{name, data_type}` where data_type is `string` or `longtext`
 
 ### Document Upload
 
 `POST /api/documents/post_document/` as multipart form:
 
-- `document` — binary file data (the decoded base64 content)
+- `document` — binary file data (the decoded base64 content), with `Content-Disposition` filename set to `OriginalFilename`
 - `title` — ProposedFilename
 - `created` — DocumentDate
 - `correspondent` — ID (integer)
 - `document_type` — ID (integer)
 - `storage_path` — ID (integer)
 - `tags` — one form field per tag ID
-- `custom_fields` — JSON string: `[{"field": <id>, "value": <value>}, ...]`
+- `custom_fields` — JSON string mapping field IDs to values: `{"<field_id>": "<value>", ...}` (per Paperless API: either an array of IDs or an object mapping field ID → value)
 
 ### Authentication
 
