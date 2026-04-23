@@ -144,15 +144,15 @@ func handleDocumentUpload(w http.ResponseWriter, r *http.Request, client *Paperl
 		return
 	}
 
-	exists, err := client.CheckDuplicate(docReq.SHA256Hash)
+	existingID, found, err := client.CheckDuplicate(docReq.SHA256Hash)
 	if err != nil {
 		paperlessErr(w, "dedup_check", err)
 		return
 	}
-	if exists {
-		writeError(w, http.StatusConflict, "duplicate_document", "document with this SHA256 hash already exists", map[string]any{
-			"SHA256Hash": docReq.SHA256Hash,
-		})
+	if found {
+		response := buildDocumentResponse(docReq, "")
+		response.DocumentURL = fmt.Sprintf("%s/documents/%d/", client.baseURL, existingID)
+		writeJSON(w, http.StatusOK, response)
 		return
 	}
 

@@ -702,12 +702,15 @@ func TestCheckDuplicate_NoDuplicate(t *testing.T) {
 	defer server.Close()
 
 	client := NewPaperlessClient(server.URL, "test-token")
-	exists, err := client.CheckDuplicate("abc123hash")
+	docID, found, err := client.CheckDuplicate("abc123hash")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if exists {
+	if found {
 		t.Fatal("expected no duplicate")
+	}
+	if docID != 0 {
+		t.Errorf("expected docID=0, got %d", docID)
 	}
 }
 
@@ -734,11 +737,14 @@ func TestCheckDuplicate_Found(t *testing.T) {
 	defer server.Close()
 
 	client := NewPaperlessClient(server.URL, "test-token")
-	exists, err := client.CheckDuplicate("abc123hash")
+	docID, found, err := client.CheckDuplicate("abc123hash")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !exists {
+	if !found {
 		t.Fatal("expected duplicate to be found")
+	}
+	if docID != 100 {
+		t.Errorf("expected docID=100, got %d", docID)
 	}
 }

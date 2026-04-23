@@ -505,7 +505,7 @@ func TestHandleDocumentUpload_NormalizesAndDedupesInputs(t *testing.T) {
 	}
 }
 
-func TestHandleDocumentUpload_DuplicateDetails(t *testing.T) {
+func TestHandleDocumentUpload_DuplicateReturns200(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "tags") {
 			json.NewEncoder(w).Encode(map[string]any{
@@ -517,9 +517,67 @@ func TestHandleDocumentUpload_DuplicateDetails(t *testing.T) {
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "documents") {
 			json.NewEncoder(w).Encode(map[string]any{
 				"count":   1,
-				"results": []map[string]any{{"id": 100}},
+				"results": []map[string]any{{"id": 42}},
 			})
 			return
+		}
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+
+	data := []byte("test")
+	hash := sha256.Sum256(data)
+	docReq := validRequest()
+	docReq.Data = base64.StdEncoding.EncodeToString(data)
+	docReq.SHA256Hash = fmt.Sprintf("%x", hash)
+	docReq.Correspondent = "  Test   Corp  " // verify normalization still echoes
+
+	body, _ := json.Marshal(docReq)
+	req := httptest.NewRequest(http.MethodPost, "/api/documents", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handleDocumentUpload(w, req, client, testTaskTimeout)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	dr := decodeDocResponse(t, w.Body.String())
+	wantURL := server.URL + "/documents/42/"
+	if dr.DocumentURL != wantURL {
+		t.Errorf("expected DocumentURL=%q, got %q", wantURL, dr.DocumentURL)
+	}
+	if dr.TaskURL != "" {
+		t.Errorf("expected TaskURL empty on 200, got %q", dr.TaskURL)
+	}
+	if dr.Correspondent != "Test Corp" {
+		t.Errorf("expected normalized Correspondent='Test Corp', got %q", dr.Correspondent)
+	}
+	// TaskID is omitempty and must not appear in the wire body on 200 responses.
+	if strings.Contains(w.Body.String(), "\"TaskID\"") {
+		t.Errorf("expected TaskID to be omitted on 200 duplicate, body: %s", w.Body.String())
+	}
+}
+
+func TestHandleDocumentUpload_DuplicateDoesNotUpload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The duplicate check touches /api/tags/ and /api/documents/. Any other
+		// endpoint (correspondents, document_types, storage_paths, post_document,
+		// custom_fields, tasks) would mean the handler ran past the short-circuit.
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/api/tags/"):
+			json.NewEncoder(w).Encode(map[string]any{
+				"count":   1,
+				"results": []map[string]any{{"id": 55, "name": "sha256:test"}},
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/api/documents/"):
+			json.NewEncoder(w).Encode(map[string]any{
+				"count":   1,
+				"results": []map[string]any{{"id": 7}},
+			})
+		default:
+			t.Errorf("unexpected %s %s — handler did not short-circuit on duplicate", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", http.StatusInternalServerError)
 		}
 	}))
 	defer server.Close()
@@ -538,14 +596,7 @@ func TestHandleDocumentUpload_DuplicateDetails(t *testing.T) {
 	w := httptest.NewRecorder()
 	handleDocumentUpload(w, req, client, testTaskTimeout)
 
-	if w.Code != http.StatusConflict {
-		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
-	}
-	er := decodeErrResponse(t, w.Body.String())
-	if er.Code != "duplicate_document" {
-		t.Errorf("expected Code=duplicate_document, got %q", er.Code)
-	}
-	if er.Details["SHA256Hash"] != docReq.SHA256Hash {
-		t.Errorf("expected Details.SHA256Hash=%q, got %v", docReq.SHA256Hash, er.Details["SHA256Hash"])
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 }

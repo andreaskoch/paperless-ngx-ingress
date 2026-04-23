@@ -90,15 +90,16 @@ curl -X POST http://localhost:8471/api/documents \
 Success responses mirror the cleaned input (normalized whitespace, filled-in
 date defaults, deduped tags) minus the base64 `Data` payload, and include a
 `TaskID` plus exactly one of `DocumentURL` (when Paperless has finished
-processing) or `TaskURL` (when polling timed out).
+processing) or `TaskURL` (when polling timed out). On a 200 (duplicate),
+`TaskID` is absent because no new task was created.
 
 | Status | Description |
 |--------|-------------|
+| 200 OK | Document already exists; response contains `DocumentURL` of the existing document. No new task is created. |
 | 201 Created | Document is ready; response contains `DocumentURL`. |
 | 202 Accepted | Upload accepted; Paperless still processing. Response contains `TaskURL` instead of `DocumentURL`. |
 | 400 Bad Request | Validation error. See error codes below. |
 | 405 Method Not Allowed | Wrong HTTP method. |
-| 409 Conflict | A document with the same SHA256 hash already exists. |
 | 502 Bad Gateway | Paperless-side error (entity creation, upload, task failure, etc.). |
 
 Error responses use a consistent envelope:
@@ -118,7 +119,6 @@ Error responses use a consistent envelope:
 | 400 | `sha256_mismatch` | `{"Expected":"<computed>","Got":"<supplied>"}` |
 | 400 | `validation_failed` | `{"MissingFields":[...]}` (all missing fields, not just the first) |
 | 405 | `method_not_allowed` | — |
-| 409 | `duplicate_document` | `{"SHA256Hash":"<hex>"}` |
 | 502 | `paperless_error` | `{"Stage":"<dedup_check\|correspondent\|document_type\|storage_path\|tag\|custom_field\|upload\|task_poll>","Message":"..."}` |
 | 502 | `paperless_task_failed` | `{"TaskID":"<uuid>","Result":"<paperless result text>"}` |
 

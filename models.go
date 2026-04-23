@@ -40,7 +40,7 @@ type Amount struct {
 // of DocumentURL (when the document is ready) or TaskURL (when polling timed
 // out). Data is never echoed.
 type DocumentResponse struct {
-	TaskID               string   `json:"TaskID"`
+	TaskID               string   `json:"TaskID,omitempty"`
 	DocumentURL          string   `json:"DocumentURL,omitempty"`
 	TaskURL              string   `json:"TaskURL,omitempty"`
 	SHA256Hash           string   `json:"SHA256Hash"`
