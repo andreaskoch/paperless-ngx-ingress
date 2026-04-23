@@ -174,7 +174,7 @@ func handleDocumentUpload(w http.ResponseWriter, r *http.Request, client *Paperl
 	// folder is baked into the path at creation time via fmt.Sprintf and the
 	// remaining placeholders are rendered by Paperless at file-write time.
 	storagePathPattern := fmt.Sprintf(
-		"/%s/{{ created_year }}/{{ document_type }}/{{ created_year }}/{{ correspondent }}/{{ title }}",
+		"/%s/{{ created_year }}/{{ document_type }}/{{ correspondent }}/{{ title }}",
 		docReq.Recipient,
 	)
 	storagePathID, err := client.GetOrCreateStoragePath(docReq.Recipient, storagePathPattern)

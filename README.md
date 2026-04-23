@@ -156,7 +156,7 @@ creation time). The template, with `<Recipient>` substituted with the actual
 recipient name:
 
 ```
-/<Recipient>/{{ created_year }}/{{ document_type }}/{{ created_year }}/{{ correspondent }}/{{ title }}
+/<Recipient>/{{ created_year }}/{{ document_type }}/{{ correspondent }}/{{ title }}
 ```
 
 Paperless appends the file extension automatically, so `ProposedFilename`'s
