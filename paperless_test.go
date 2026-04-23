@@ -129,6 +129,72 @@ func TestGetOrCreateEntity_AuthHeader(t *testing.T) {
 	}
 }
 
+func TestGetOrCreateEntity_RaceRetry(t *testing.T) {
+	var (
+		getCount  int
+		postCount int
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			getCount++
+			if getCount == 1 {
+				// initial lookup: not yet present
+				json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []map[string]any{}})
+				return
+			}
+			// re-search after conflict: now present (created by concurrent request)
+			json.NewEncoder(w).Encode(map[string]any{
+				"count":   1,
+				"results": []map[string]any{{"id": 77, "name": "Test Corp"}},
+			})
+			return
+		}
+		if r.Method == http.MethodPost {
+			postCount++
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"name":["correspondent with this name already exists."]}`))
+			return
+		}
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	id, err := client.GetOrCreateEntity("correspondents", "Test Corp", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != 77 {
+		t.Fatalf("expected id 77 after race-retry, got %d", id)
+	}
+	if getCount != 2 || postCount != 1 {
+		t.Fatalf("expected 2 GETs + 1 POST, got %d GETs + %d POSTs", getCount, postCount)
+	}
+}
+
+func TestGetOrCreateEntity_400NotNameConflict(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []map[string]any{}})
+			return
+		}
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"detail":"some other validation error"}`))
+			return
+		}
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	_, err := client.GetOrCreateEntity("correspondents", "Test Corp", nil)
+	if err == nil {
+		t.Fatal("expected error for non-name 400, got nil")
+	}
+	if !strings.Contains(err.Error(), "400") {
+		t.Errorf("expected error to mention 400, got: %v", err)
+	}
+}
+
 func TestGetOrCreateEntity_APIError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -165,6 +231,30 @@ func TestGetOrCreateCustomField_Existing(t *testing.T) {
 	}
 	if id != 5 {
 		t.Fatalf("expected id 5, got %d", id)
+	}
+}
+
+func TestGetOrCreateCustomField_CaseInsensitive(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("expected GET only (existing match), got %s", r.Method)
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"count": 1,
+			"results": []map[string]any{
+				{"id": 7, "name": "ShortSummary", "data_type": "longtext"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	id, err := client.GetOrCreateCustomField("shortsummary", "longtext")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != 7 {
+		t.Fatalf("expected id 7, got %d", id)
 	}
 }
 
@@ -206,6 +296,45 @@ func TestGetOrCreateCustomField_CreateNew(t *testing.T) {
 	}
 	if id != 12 {
 		t.Fatalf("expected id 12, got %d", id)
+	}
+}
+
+func TestGetOrCreateCustomField_RaceRetry(t *testing.T) {
+	var getCount, postCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			getCount++
+			if getCount == 1 {
+				json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []map[string]any{}})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"count": 1,
+				"results": []map[string]any{
+					{"id": 42, "name": "Amounts", "data_type": "longtext"},
+				},
+			})
+			return
+		}
+		if r.Method == http.MethodPost {
+			postCount++
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"name":["custom field with this name already exists."]}`))
+			return
+		}
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	id, err := client.GetOrCreateCustomField("Amounts", "longtext")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != 42 {
+		t.Fatalf("expected id 42 after race-retry, got %d", id)
+	}
+	if getCount != 2 || postCount != 1 {
+		t.Fatalf("expected 2 GETs + 1 POST, got %d GETs + %d POSTs", getCount, postCount)
 	}
 }
 
@@ -311,6 +440,148 @@ func TestUploadDocument(t *testing.T) {
 	}
 	if taskID != "abc-123-uuid" {
 		t.Fatalf("expected task ID 'abc-123-uuid', got %q", taskID)
+	}
+}
+
+func TestGetOrCreateStoragePath_PathMatches(t *testing.T) {
+	var postCalled, patchCalled bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			json.NewEncoder(w).Encode(map[string]any{
+				"count": 1,
+				"results": []map[string]any{
+					{"id": 10, "name": "MyCo", "path": "/MyCo/{{ created_year }}/{{ correspondent }}/{{ title }}"},
+				},
+			})
+		case http.MethodPost:
+			postCalled = true
+			w.WriteHeader(http.StatusCreated)
+		case http.MethodPatch:
+			patchCalled = true
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	id, err := client.GetOrCreateStoragePath("MyCo", "/MyCo/{{ created_year }}/{{ correspondent }}/{{ title }}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != 10 {
+		t.Fatalf("expected id 10, got %d", id)
+	}
+	if postCalled {
+		t.Error("expected no POST when path matches")
+	}
+	if patchCalled {
+		t.Error("expected no PATCH when path matches")
+	}
+}
+
+func TestGetOrCreateStoragePath_PathDiverges(t *testing.T) {
+	var patchedBody map[string]any
+	var patchedURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			json.NewEncoder(w).Encode(map[string]any{
+				"count": 1,
+				"results": []map[string]any{
+					{"id": 11, "name": "MyCo", "path": "/old/path"},
+				},
+			})
+		case http.MethodPatch:
+			patchedURL = r.URL.Path
+			json.NewDecoder(r.Body).Decode(&patchedBody)
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{"id": 11, "name": "MyCo", "path": patchedBody["path"]})
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	desired := "/MyCo/{{ created_year }}/{{ correspondent }}/{{ title }}"
+	id, err := client.GetOrCreateStoragePath("MyCo", desired)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != 11 {
+		t.Fatalf("expected id 11, got %d", id)
+	}
+	if patchedBody["path"] != desired {
+		t.Errorf("expected PATCH path=%q, got %v", desired, patchedBody["path"])
+	}
+	if patchedURL != "/api/storage_paths/11/" {
+		t.Errorf("expected PATCH on /api/storage_paths/11/, got %s", patchedURL)
+	}
+}
+
+func TestGetOrCreateStoragePath_NotFound(t *testing.T) {
+	var postBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []map[string]any{}})
+		case http.MethodPost:
+			json.NewDecoder(r.Body).Decode(&postBody)
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{"id": 99, "name": postBody["name"], "path": postBody["path"]})
+		}
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	desired := "/NewCo/{{ created_year }}/{{ correspondent }}/{{ title }}"
+	id, err := client.GetOrCreateStoragePath("NewCo", desired)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != 99 {
+		t.Fatalf("expected id 99, got %d", id)
+	}
+	if postBody["name"] != "NewCo" {
+		t.Errorf("expected POST name=NewCo, got %v", postBody["name"])
+	}
+	if postBody["path"] != desired {
+		t.Errorf("expected POST path=%q, got %v", desired, postBody["path"])
+	}
+}
+
+func TestGetOrCreateStoragePath_RaceRetry(t *testing.T) {
+	var getCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			getCount++
+			if getCount == 1 {
+				json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []map[string]any{}})
+				return
+			}
+			// re-search after conflict — now present with the already-desired path
+			json.NewEncoder(w).Encode(map[string]any{
+				"count": 1,
+				"results": []map[string]any{
+					{"id": 33, "name": "RaceCo", "path": "/RaceCo/x"},
+				},
+			})
+		case http.MethodPost:
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"name":["storage path with this name already exists."]}`))
+		}
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	id, err := client.GetOrCreateStoragePath("RaceCo", "/RaceCo/x")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != 33 {
+		t.Fatalf("expected id 33 after race-retry, got %d", id)
 	}
 }
 

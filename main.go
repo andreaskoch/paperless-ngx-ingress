@@ -71,6 +71,12 @@ func handleDocumentUpload(w http.ResponseWriter, r *http.Request, client *Paperl
 	// Fill date defaults before validation
 	docReq.FillDateDefaults(time.Now())
 
+	// Normalize entity-name fields before validation so all-whitespace values
+	// are caught by the required-field check.
+	docReq.Correspondent = normalizeName(docReq.Correspondent)
+	docReq.DocumentType = normalizeName(docReq.DocumentType)
+	docReq.Recipient = normalizeName(docReq.Recipient)
+
 	// Validate required fields
 	if err := docReq.Validate(); err != nil {
 		writeJSONError(w, err.Error(), http.StatusBadRequest)
@@ -119,20 +125,16 @@ func handleDocumentUpload(w http.ResponseWriter, r *http.Request, client *Paperl
 		return
 	}
 
-	// Resolve storage path
+	// Resolve storage path (dedicated method: updates "path" if it diverges)
 	storagePathPattern := fmt.Sprintf("/%s/{{ created_year }}/{{ correspondent }}/{{ title }}", docReq.Recipient)
-	storagePathID, err := client.GetOrCreateEntity("storage_paths", docReq.Recipient, map[string]string{
-		"path": storagePathPattern,
-	})
+	storagePathID, err := client.GetOrCreateStoragePath(docReq.Recipient, storagePathPattern)
 	if err != nil {
 		writeJSONError(w, "resolving storage path: "+err.Error(), http.StatusBadGateway)
 		return
 	}
 
-	// Resolve tags (user tags + sha256 dedup tag)
-	allTags := make([]string, len(docReq.Tags)+1)
-	copy(allTags, docReq.Tags)
-	allTags[len(docReq.Tags)] = "sha256:" + docReq.SHA256Hash
+	// Resolve tags (normalized + deduped user tags + sha256 dedup tag).
+	allTags := dedupTagNames(append(dedupTagNames(docReq.Tags), "sha256:"+docReq.SHA256Hash))
 	tagIDs := make([]int, 0, len(allTags))
 	for _, tagName := range allTags {
 		tagID, err := client.GetOrCreateEntity("tags", tagName, nil)
@@ -142,6 +144,7 @@ func handleDocumentUpload(w http.ResponseWriter, r *http.Request, client *Paperl
 		}
 		tagIDs = append(tagIDs, tagID)
 	}
+	tagIDs = dedupInts(tagIDs)
 
 	// Resolve custom fields and build values map
 	type customFieldDef struct {
