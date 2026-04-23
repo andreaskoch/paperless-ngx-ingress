@@ -100,11 +100,21 @@ func (c *PaperlessClient) checkTask(pollPath, taskID string) (done bool, docID i
 	status, _ := task["status"].(string)
 	switch status {
 	case "SUCCESS":
-		related, ok := task["related_document"].(float64)
-		if !ok {
+		// Paperless-ngx 2.20+ returns related_document as a string, older versions as a number.
+		var relatedID int
+		switch v := task["related_document"].(type) {
+		case float64:
+			relatedID = int(v)
+		case string:
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return false, 0, fmt.Errorf("task %s SUCCESS with non-numeric related_document %q", taskID, v)
+			}
+			relatedID = n
+		default:
 			return false, 0, fmt.Errorf("task %s SUCCESS without related_document", taskID)
 		}
-		return true, int(related), nil
+		return true, relatedID, nil
 	case "FAILURE":
 		result, _ := task["result"].(string)
 		return false, 0, &ErrTaskFailed{TaskID: taskID, Result: result}

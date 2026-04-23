@@ -619,6 +619,28 @@ func TestWaitForDocument_Success(t *testing.T) {
 	}
 }
 
+// Paperless-ngx 2.20+ returns related_document as a JSON string; earlier
+// versions returned it as a JSON number. Both must work.
+func TestWaitForDocument_SuccessWithStringRelatedDocument(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]map[string]any{
+			{"task_id": "uuid-str", "status": "SUCCESS", "related_document": "4"},
+		})
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	client.taskPollInterval = 5 * time.Millisecond
+
+	id, err := client.WaitForDocument(context.Background(), "uuid-str", 1*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != 4 {
+		t.Errorf("expected doc ID 4, got %d", id)
+	}
+}
+
 func TestWaitForDocument_Failure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]map[string]any{
