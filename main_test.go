@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -294,6 +296,115 @@ func TestHandleDocumentUpload_Success201(t *testing.T) {
 	}
 }
 
+// Paperless appends the file extension when writing to disk, so the "title"
+// form field sent in the upload must not already carry one — otherwise the
+// stored filename ends in "<name>.pdf.pdf".
+func TestHandleDocumentUpload_TitleStripsExtension(t *testing.T) {
+	var uploadedTitle string
+	var uploadedCustomFields string
+	customFieldsByName := map[string]int{}
+	var nextCustomFieldID = 100
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "post_document") {
+			fields := parseMultipartFields(t, r)
+			uploadedTitle = fields["title"]
+			uploadedCustomFields = fields["custom_fields"]
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode("task-uuid-ext")
+			return
+		}
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/tasks/") {
+			json.NewEncoder(w).Encode([]map[string]any{
+				{"task_id": "task-uuid-ext", "status": "SUCCESS", "related_document": 1},
+			})
+			return
+		}
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []map[string]any{}})
+			return
+		}
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/custom_fields/") {
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			name, _ := body["name"].(string)
+			id := nextCustomFieldID
+			nextCustomFieldID++
+			customFieldsByName[name] = id
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{"id": id, "name": name})
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{"id": 1, "name": "created"})
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	client.taskPollInterval = 5 * time.Millisecond
+
+	data := []byte("ext-stripping test")
+	hash := sha256.Sum256(data)
+	docReq := validRequest()
+	docReq.Data = base64.StdEncoding.EncodeToString(data)
+	docReq.SHA256Hash = fmt.Sprintf("%x", hash)
+	docReq.ProposedFilename = "2026-04-02_IHK_Bremen_Beitragsbescheid_2026_wambo.pdf"
+
+	body, _ := json.Marshal(docReq)
+	req := httptest.NewRequest(http.MethodPost, "/api/documents", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handleDocumentUpload(w, req, client, testTaskTimeout)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	wantTitle := "2026-04-02_IHK_Bremen_Beitragsbescheid_2026_wambo"
+	if uploadedTitle != wantTitle {
+		t.Errorf("expected title %q, got %q", wantTitle, uploadedTitle)
+	}
+	if strings.HasSuffix(uploadedTitle, ".pdf") {
+		t.Errorf("title should not retain extension, got %q", uploadedTitle)
+	}
+	// Recipient must be in the custom_fields JSON, under the field ID assigned
+	// to the "Recipient" custom field, so the storage-path template can resolve
+	// {{ custom_fields|get_cf_value("Recipient") }}.
+	recipientID, ok := customFieldsByName["Recipient"]
+	if !ok {
+		t.Fatalf("Recipient custom field was not created; created fields: %v", customFieldsByName)
+	}
+	var cf map[string]any
+	if err := json.Unmarshal([]byte(uploadedCustomFields), &cf); err != nil {
+		t.Fatalf("parsing custom_fields JSON %q: %v", uploadedCustomFields, err)
+	}
+	if got := cf[fmt.Sprintf("%d", recipientID)]; got != "My Company" {
+		t.Errorf("expected custom_fields[%d]=\"My Company\", got %v (full: %v)", recipientID, got, cf)
+	}
+}
+
+// parseMultipartFields reads the non-file form fields from a multipart POST.
+func parseMultipartFields(t *testing.T, r *http.Request) map[string]string {
+	t.Helper()
+	_, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatalf("parsing content-type: %v", err)
+	}
+	mr := multipart.NewReader(r.Body, params["boundary"])
+	out := map[string]string{}
+	for {
+		part, err := mr.NextPart()
+		if err != nil {
+			break
+		}
+		if part.FileName() != "" {
+			continue
+		}
+		buf := new(bytes.Buffer)
+		buf.ReadFrom(part)
+		out[part.FormName()] = buf.String()
+	}
+	return out
+}
+
 func TestHandleDocumentUpload_EmptySHA256(t *testing.T) {
 	server := mockPaperlessServer(t, "SUCCESS", 1, "", "task-uuid-456")
 	defer server.Close()
@@ -469,8 +580,8 @@ func TestHandleDocumentUpload_NormalizesAndDedupesInputs(t *testing.T) {
 	if len(correspondentSearches) != 1 || correspondentSearches[0] != "Test Corp" {
 		t.Errorf("expected correspondent search with normalized 'Test Corp', got %v", correspondentSearches)
 	}
-	if len(storagePathSearches) != 1 || storagePathSearches[0] != "My Company" {
-		t.Errorf("expected storage path search with normalized 'My Company', got %v", storagePathSearches)
+	if len(storagePathSearches) != 1 || storagePathSearches[0] != "Default" {
+		t.Errorf("expected storage path search with name 'Default', got %v", storagePathSearches)
 	}
 	expectedTagPosts := map[string]bool{
 		"invoice": true,
