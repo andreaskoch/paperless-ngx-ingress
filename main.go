@@ -4,10 +4,14 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -28,47 +32,79 @@ func main() {
 		log.Fatal("PAPERLESS_BASE_URL and PAPERLESS_API_TOKEN must be set")
 	}
 
+	taskTimeout := readTaskTimeout(os.Getenv("PAPERLESS_TASK_TIMEOUT_SECONDS"))
+
 	client := NewPaperlessClient(baseURL, token)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/api/documents", func(w http.ResponseWriter, r *http.Request) {
-		handleDocumentUpload(w, r, client)
+		handleDocumentUpload(w, r, client, taskTimeout)
 	})
 
 	log.Printf("Starting server on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
 
+// readTaskTimeout parses the PAPERLESS_TASK_TIMEOUT_SECONDS value (integer
+// seconds, must be positive). On parse error, negative, or zero, it logs a
+// warning and falls back to 120s.
+func readTaskTimeout(raw string) time.Duration {
+	const defaultTimeout = 120 * time.Second
+	if raw == "" {
+		return defaultTimeout
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		log.Printf("PAPERLESS_TASK_TIMEOUT_SECONDS=%q invalid; using default %s", raw, defaultTimeout)
+		return defaultTimeout
+	}
+	return time.Duration(n) * time.Second
+}
+
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", nil)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-func writeJSONError(w http.ResponseWriter, message string, statusCode int) {
+// writeError writes a structured error response. details may be nil.
+func writeError(w http.ResponseWriter, statusCode int, code, message string, details map[string]any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(map[string]string{"error": message})
+	json.NewEncoder(w).Encode(ErrorResponse{Code: code, Error: message, Details: details})
 }
 
-func handleDocumentUpload(w http.ResponseWriter, r *http.Request, client *PaperlessClient) {
+// writeJSON writes any payload with the given status code.
+func writeJSON(w http.ResponseWriter, statusCode int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(payload)
+}
+
+// paperlessErr maps a Paperless-side failure to a structured 502 response.
+func paperlessErr(w http.ResponseWriter, stage string, err error) {
+	writeError(w, http.StatusBadGateway, "paperless_error", fmt.Sprintf("%s: %s", stage, err.Error()), map[string]any{
+		"Stage":   stage,
+		"Message": err.Error(),
+	})
+}
+
+func handleDocumentUpload(w http.ResponseWriter, r *http.Request, client *PaperlessClient, taskTimeout time.Duration) {
 	if r.Method != http.MethodPost {
-		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", nil)
 		return
 	}
 
-	// Parse request
 	var docReq DocumentRequest
 	if err := json.NewDecoder(r.Body).Decode(&docReq); err != nil {
-		writeJSONError(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON: "+err.Error(), nil)
 		return
 	}
 
-	// Fill date defaults before validation
 	docReq.FillDateDefaults(time.Now())
 
 	// Normalize entity-name fields before validation so all-whitespace values
@@ -76,77 +112,83 @@ func handleDocumentUpload(w http.ResponseWriter, r *http.Request, client *Paperl
 	docReq.Correspondent = normalizeName(docReq.Correspondent)
 	docReq.DocumentType = normalizeName(docReq.DocumentType)
 	docReq.Recipient = normalizeName(docReq.Recipient)
+	docReq.Tags = dedupTagNames(docReq.Tags)
 
-	// Validate required fields
 	if err := docReq.Validate(); err != nil {
-		writeJSONError(w, err.Error(), http.StatusBadRequest)
+		var ve *ValidationError
+		if errors.As(err, &ve) {
+			writeError(w, http.StatusBadRequest, "validation_failed", err.Error(), map[string]any{
+				"MissingFields": ve.MissingFields,
+			})
+			return
+		}
+		writeError(w, http.StatusBadRequest, "validation_failed", err.Error(), nil)
 		return
 	}
 
-	// Decode base64 data
 	docData, err := base64.StdEncoding.DecodeString(docReq.Data)
 	if err != nil {
-		writeJSONError(w, "invalid base64 Data: "+err.Error(), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_base64", "invalid base64 Data: "+err.Error(), nil)
 		return
 	}
 
-	// Compute SHA256 — use provided hash for validation, or calculate if empty
 	computed := sha256.Sum256(docData)
 	computedHex := fmt.Sprintf("%x", computed)
 	if docReq.SHA256Hash == "" {
 		docReq.SHA256Hash = computedHex
 	} else if computedHex != docReq.SHA256Hash {
-		writeJSONError(w, "SHA256 hash mismatch", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "sha256_mismatch", "SHA256 hash mismatch", map[string]any{
+			"Expected": computedHex,
+			"Got":      docReq.SHA256Hash,
+		})
 		return
 	}
 
-	// Check for duplicates
 	exists, err := client.CheckDuplicate(docReq.SHA256Hash)
 	if err != nil {
-		writeJSONError(w, "deduplication check failed: "+err.Error(), http.StatusBadGateway)
+		paperlessErr(w, "dedup_check", err)
 		return
 	}
 	if exists {
-		writeJSONError(w, "document with this SHA256 hash already exists", http.StatusConflict)
+		writeError(w, http.StatusConflict, "duplicate_document", "document with this SHA256 hash already exists", map[string]any{
+			"SHA256Hash": docReq.SHA256Hash,
+		})
 		return
 	}
 
-	// Resolve correspondent
 	correspondentID, err := client.GetOrCreateEntity("correspondents", docReq.Correspondent, nil)
 	if err != nil {
-		writeJSONError(w, "resolving correspondent: "+err.Error(), http.StatusBadGateway)
+		paperlessErr(w, "correspondent", err)
 		return
 	}
 
-	// Resolve document type
 	docTypeID, err := client.GetOrCreateEntity("document_types", docReq.DocumentType, nil)
 	if err != nil {
-		writeJSONError(w, "resolving document type: "+err.Error(), http.StatusBadGateway)
+		paperlessErr(w, "document_type", err)
 		return
 	}
 
-	// Resolve storage path (dedicated method: updates "path" if it diverges)
 	storagePathPattern := fmt.Sprintf("/%s/{{ created_year }}/{{ correspondent }}/{{ title }}", docReq.Recipient)
 	storagePathID, err := client.GetOrCreateStoragePath(docReq.Recipient, storagePathPattern)
 	if err != nil {
-		writeJSONError(w, "resolving storage path: "+err.Error(), http.StatusBadGateway)
+		paperlessErr(w, "storage_path", err)
 		return
 	}
 
-	// Resolve tags (normalized + deduped user tags + sha256 dedup tag).
-	allTags := dedupTagNames(append(dedupTagNames(docReq.Tags), "sha256:"+docReq.SHA256Hash))
+	// User tags + sha256 dedup tag. docReq.Tags is already deduped above; we
+	// just append the sha256 tag and re-dedup defensively.
+	allTags := dedupTagNames(append(append([]string{}, docReq.Tags...), "sha256:"+docReq.SHA256Hash))
 	tagIDs := make([]int, 0, len(allTags))
 	for _, tagName := range allTags {
 		tagID, err := client.GetOrCreateEntity("tags", tagName, nil)
 		if err != nil {
-			writeJSONError(w, fmt.Sprintf("resolving tag %q: %s", tagName, err.Error()), http.StatusBadGateway)
+			paperlessErr(w, "tag", fmt.Errorf("%q: %w", tagName, err))
 			return
 		}
 		tagIDs = append(tagIDs, tagID)
 	}
 	tagIDs = dedupInts(tagIDs)
 
-	// Resolve custom fields and build values map
 	type customFieldDef struct {
 		Name     string
 		DataType string
@@ -167,13 +209,12 @@ func handleDocumentUpload(w http.ResponseWriter, r *http.Request, client *Paperl
 	for _, fd := range fieldDefs {
 		fieldID, err := client.GetOrCreateCustomField(fd.Name, fd.DataType)
 		if err != nil {
-			writeJSONError(w, fmt.Sprintf("resolving custom field %q: %s", fd.Name, err.Error()), http.StatusBadGateway)
+			paperlessErr(w, "custom_field", fmt.Errorf("%q: %w", fd.Name, err))
 			return
 		}
 		customFields[fmt.Sprintf("%d", fieldID)] = fd.Value
 	}
 
-	// Upload document
 	taskID, err := client.UploadDocument(UploadParams{
 		DocumentData:     docData,
 		OriginalFilename: docReq.OriginalFilename,
@@ -186,13 +227,74 @@ func handleDocumentUpload(w http.ResponseWriter, r *http.Request, client *Paperl
 		CustomFields:     customFields,
 	})
 	if err != nil {
-		writeJSONError(w, "uploading document: "+err.Error(), http.StatusBadGateway)
+		paperlessErr(w, "upload", err)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{"task_id": taskID})
+	response := buildDocumentResponse(docReq, taskID)
+
+	docID, waitErr := client.WaitForDocument(r.Context(), taskID, taskTimeout)
+	switch {
+	case waitErr == nil:
+		response.DocumentURL = fmt.Sprintf("%s/documents/%d/", client.baseURL, docID)
+		writeJSON(w, http.StatusCreated, response)
+	case isTimeout(waitErr):
+		response.TaskURL = fmt.Sprintf("%s/api/tasks/?task_id=%s", client.baseURL, url.QueryEscape(taskID))
+		writeJSON(w, http.StatusAccepted, response)
+	case isTaskFailed(waitErr):
+		var f *ErrTaskFailed
+		errors.As(waitErr, &f)
+		writeError(w, http.StatusBadGateway, "paperless_task_failed", waitErr.Error(), map[string]any{
+			"TaskID": f.TaskID,
+			"Result": f.Result,
+		})
+	default:
+		paperlessErr(w, "task_poll", waitErr)
+	}
+}
+
+func isTimeout(err error) bool {
+	var e *ErrTaskTimeout
+	return errors.As(err, &e)
+}
+
+func isTaskFailed(err error) bool {
+	var e *ErrTaskFailed
+	return errors.As(err, &e)
+}
+
+// buildDocumentResponse copies the cleaned request fields into a DocumentResponse.
+// URL fields are left empty; callers attach DocumentURL or TaskURL based on the
+// polling outcome. Tags exclude any "sha256:" dedup tag.
+func buildDocumentResponse(req DocumentRequest, taskID string) DocumentResponse {
+	tags := make([]string, 0, len(req.Tags))
+	for _, t := range req.Tags {
+		if strings.HasPrefix(t, "sha256:") {
+			continue
+		}
+		tags = append(tags, t)
+	}
+	return DocumentResponse{
+		TaskID:               taskID,
+		SHA256Hash:           req.SHA256Hash,
+		OriginalFilename:     req.OriginalFilename,
+		FileType:             req.FileType,
+		DocumentDate:         req.DocumentDate,
+		Year:                 req.Year,
+		Month:                req.Month,
+		Day:                  req.Day,
+		DocumentType:         req.DocumentType,
+		DocumentLanguageCode: req.DocumentLanguageCode,
+		Correspondent:        req.Correspondent,
+		CorrespondentDetails: req.CorrespondentDetails,
+		Recipient:            req.Recipient,
+		RecipientDetails:     req.RecipientDetails,
+		ShortSummary:         req.ShortSummary,
+		LongSummary:          req.LongSummary,
+		ProposedFilename:     req.ProposedFilename,
+		Amounts:              req.Amounts,
+		Tags:                 tags,
+	}
 }
 
 func mustJSON(v any) string {

@@ -13,6 +13,31 @@ func TestValidateDocumentRequest_Valid(t *testing.T) {
 	}
 }
 
+func TestValidate_ReturnsAllMissingFields(t *testing.T) {
+	req := validRequest()
+	req.Correspondent = ""
+	req.ShortSummary = ""
+	req.LongSummary = ""
+
+	err := req.Validate()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	ve, ok := err.(*ValidationError)
+	if !ok {
+		t.Fatalf("expected *ValidationError, got %T: %v", err, err)
+	}
+	got := make(map[string]bool, len(ve.MissingFields))
+	for _, f := range ve.MissingFields {
+		got[f] = true
+	}
+	for _, want := range []string{"Correspondent", "ShortSummary", "LongSummary"} {
+		if !got[want] {
+			t.Errorf("expected %q in MissingFields, got %v", want, ve.MissingFields)
+		}
+	}
+}
+
 func TestValidateDocumentRequest_MissingFields(t *testing.T) {
 	tests := []struct {
 		name    string

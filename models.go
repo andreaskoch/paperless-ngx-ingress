@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -33,6 +34,40 @@ type Amount struct {
 	Type         string  `json:"type"`
 	Amount       float64 `json:"Amount"`
 	CurrencyCode string  `json:"CurrencyCode"`
+}
+
+// DocumentResponse mirrors the cleaned request plus a TaskID and exactly one
+// of DocumentURL (when the document is ready) or TaskURL (when polling timed
+// out). Data is never echoed.
+type DocumentResponse struct {
+	TaskID               string   `json:"TaskID"`
+	DocumentURL          string   `json:"DocumentURL,omitempty"`
+	TaskURL              string   `json:"TaskURL,omitempty"`
+	SHA256Hash           string   `json:"SHA256Hash"`
+	OriginalFilename     string   `json:"OriginalFilename"`
+	FileType             string   `json:"FileType"`
+	DocumentDate         string   `json:"DocumentDate"`
+	Year                 string   `json:"Year"`
+	Month                string   `json:"Month"`
+	Day                  string   `json:"Day"`
+	DocumentType         string   `json:"DocumentType"`
+	DocumentLanguageCode string   `json:"DocumentLanguageCode"`
+	Correspondent        string   `json:"Correspondent"`
+	CorrespondentDetails string   `json:"CorrespondentDetails"`
+	Recipient            string   `json:"Recipient"`
+	RecipientDetails     string   `json:"RecipientDetails"`
+	ShortSummary         string   `json:"ShortSummary"`
+	LongSummary          string   `json:"LongSummary"`
+	ProposedFilename     string   `json:"ProposedFilename"`
+	Amounts              []Amount `json:"Amounts"`
+	Tags                 []string `json:"Tags"`
+}
+
+// ErrorResponse is the wire shape for all error responses.
+type ErrorResponse struct {
+	Code    string         `json:"Code"`
+	Error   string         `json:"Error"`
+	Details map[string]any `json:"Details,omitempty"`
 }
 
 // FillDateDefaults sets Year/Month/Day from DocumentDate if present,
@@ -75,6 +110,16 @@ func (r *DocumentRequest) FillDateDefaults(now time.Time) {
 	r.DocumentDate = fmt.Sprintf("%s-%s-%s", r.Year, r.Month, r.Day)
 }
 
+// ValidationError carries the list of required fields that were empty after
+// normalization and default-filling.
+type ValidationError struct {
+	MissingFields []string
+}
+
+func (e *ValidationError) Error() string {
+	return "missing required fields: " + strings.Join(e.MissingFields, ", ")
+}
+
 func (r *DocumentRequest) Validate() error {
 	type fieldCheck struct {
 		name  string
@@ -94,10 +139,14 @@ func (r *DocumentRequest) Validate() error {
 		{"LongSummary", r.LongSummary},
 		{"ProposedFilename", r.ProposedFilename},
 	}
+	var missing []string
 	for _, c := range checks {
 		if c.value == "" {
-			return fmt.Errorf("missing required field: %s", c.name)
+			missing = append(missing, c.name)
 		}
+	}
+	if len(missing) > 0 {
+		return &ValidationError{MissingFields: missing}
 	}
 	return nil
 }

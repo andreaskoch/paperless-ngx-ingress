@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -9,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGetOrCreateEntity_ExistingEntity(t *testing.T) {
@@ -582,6 +585,88 @@ func TestGetOrCreateStoragePath_RaceRetry(t *testing.T) {
 	}
 	if id != 33 {
 		t.Fatalf("expected id 33 after race-retry, got %d", id)
+	}
+}
+
+func TestWaitForDocument_Success(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			json.NewEncoder(w).Encode([]map[string]any{
+				{"task_id": "uuid-1", "status": "STARTED"},
+			})
+			return
+		}
+		json.NewEncoder(w).Encode([]map[string]any{
+			{"task_id": "uuid-1", "status": "SUCCESS", "related_document": 777},
+		})
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	client.taskPollInterval = 5 * time.Millisecond
+
+	id, err := client.WaitForDocument(context.Background(), "uuid-1", 1*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != 777 {
+		t.Errorf("expected doc ID 777, got %d", id)
+	}
+	if calls < 2 {
+		t.Errorf("expected at least 2 poll calls, got %d", calls)
+	}
+}
+
+func TestWaitForDocument_Failure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]map[string]any{
+			{"task_id": "uuid-2", "status": "FAILURE", "result": "consumer couldn't parse PDF"},
+		})
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	client.taskPollInterval = 5 * time.Millisecond
+
+	_, err := client.WaitForDocument(context.Background(), "uuid-2", 1*time.Second)
+	if err == nil {
+		t.Fatal("expected ErrTaskFailed, got nil")
+	}
+	var taskErr *ErrTaskFailed
+	if !errors.As(err, &taskErr) {
+		t.Fatalf("expected *ErrTaskFailed, got %T: %v", err, err)
+	}
+	if taskErr.TaskID != "uuid-2" {
+		t.Errorf("expected TaskID=uuid-2, got %q", taskErr.TaskID)
+	}
+	if taskErr.Result != "consumer couldn't parse PDF" {
+		t.Errorf("expected Result passed through, got %q", taskErr.Result)
+	}
+}
+
+func TestWaitForDocument_Timeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]map[string]any{
+			{"task_id": "uuid-3", "status": "PENDING"},
+		})
+	}))
+	defer server.Close()
+
+	client := NewPaperlessClient(server.URL, "test-token")
+	client.taskPollInterval = 5 * time.Millisecond
+
+	_, err := client.WaitForDocument(context.Background(), "uuid-3", 30*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected ErrTaskTimeout, got nil")
+	}
+	var toErr *ErrTaskTimeout
+	if !errors.As(err, &toErr) {
+		t.Fatalf("expected *ErrTaskTimeout, got %T: %v", err, err)
+	}
+	if toErr.TaskID != "uuid-3" {
+		t.Errorf("expected TaskID=uuid-3, got %q", toErr.TaskID)
 	}
 }
 

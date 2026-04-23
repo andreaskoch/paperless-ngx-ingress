@@ -18,7 +18,15 @@ Create a `.env` file (or set environment variables):
 PAPERLESS_BASE_URL=https://archive.fe83.de
 PAPERLESS_API_TOKEN=your-api-token-here
 PORT=8471
+PAPERLESS_TASK_TIMEOUT_SECONDS=120
 ```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PAPERLESS_BASE_URL` | *(required)* | Base URL of the Paperless-ngx instance, no trailing slash. |
+| `PAPERLESS_API_TOKEN` | *(required)* | API token for the Paperless-ngx user. |
+| `PORT` | `8471` | Listen port. |
+| `PAPERLESS_TASK_TIMEOUT_SECONDS` | `120` | Max seconds to wait for Paperless to finish processing a document before returning 202. |
 
 ## Running
 
@@ -79,12 +87,40 @@ curl -X POST http://localhost:8471/api/documents \
 
 **Responses:**
 
+Success responses mirror the cleaned input (normalized whitespace, filled-in
+date defaults, deduped tags) minus the base64 `Data` payload, and include a
+`TaskID` plus exactly one of `DocumentURL` (when Paperless has finished
+processing) or `TaskURL` (when polling timed out).
+
 | Status | Description |
 |--------|-------------|
-| 201 | Document accepted. Body: `{"task_id": "<uuid>"}` |
-| 400 | Validation error (missing fields, SHA256 mismatch) |
-| 409 | Duplicate document (SHA256 already exists) |
-| 502 | Paperless NGX API error |
+| 201 Created | Document is ready; response contains `DocumentURL`. |
+| 202 Accepted | Upload accepted; Paperless still processing. Response contains `TaskURL` instead of `DocumentURL`. |
+| 400 Bad Request | Validation error. See error codes below. |
+| 405 Method Not Allowed | Wrong HTTP method. |
+| 409 Conflict | A document with the same SHA256 hash already exists. |
+| 502 Bad Gateway | Paperless-side error (entity creation, upload, task failure, etc.). |
+
+Error responses use a consistent envelope:
+
+```json
+{
+  "Code": "<stable_machine_code>",
+  "Error": "<human readable message>",
+  "Details": { ... optional, omitted when empty ... }
+}
+```
+
+| HTTP | `Code` | `Details` |
+|------|--------|-----------|
+| 400 | `invalid_json` | — |
+| 400 | `invalid_base64` | — |
+| 400 | `sha256_mismatch` | `{"Expected":"<computed>","Got":"<supplied>"}` |
+| 400 | `validation_failed` | `{"MissingFields":[...]}` (all missing fields, not just the first) |
+| 405 | `method_not_allowed` | — |
+| 409 | `duplicate_document` | `{"SHA256Hash":"<hex>"}` |
+| 502 | `paperless_error` | `{"Stage":"<dedup_check\|correspondent\|document_type\|storage_path\|tag\|custom_field\|upload\|task_poll>","Message":"..."}` |
+| 502 | `paperless_task_failed` | `{"TaskID":"<uuid>","Result":"<paperless result text>"}` |
 
 ### GET /health
 

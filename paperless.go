@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,19 +11,105 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type PaperlessClient struct {
-	baseURL    string
-	token      string
-	httpClient *http.Client
+	baseURL          string
+	token            string
+	httpClient       *http.Client
+	taskPollInterval time.Duration
 }
 
 func NewPaperlessClient(baseURL, token string) *PaperlessClient {
 	return &PaperlessClient{
-		baseURL:    baseURL,
-		token:      token,
-		httpClient: &http.Client{},
+		baseURL:          baseURL,
+		token:            token,
+		httpClient:       &http.Client{},
+		taskPollInterval: 1 * time.Second,
+	}
+}
+
+// ErrTaskTimeout is returned by WaitForDocument when the timeout elapses
+// before the task reaches a terminal state.
+type ErrTaskTimeout struct{ TaskID string }
+
+func (e *ErrTaskTimeout) Error() string {
+	return fmt.Sprintf("timed out waiting for task %s", e.TaskID)
+}
+
+// ErrTaskFailed is returned by WaitForDocument when the task's status is
+// FAILURE. Result carries the Paperless-supplied failure message.
+type ErrTaskFailed struct {
+	TaskID string
+	Result string
+}
+
+func (e *ErrTaskFailed) Error() string {
+	return fmt.Sprintf("task %s failed: %s", e.TaskID, e.Result)
+}
+
+// WaitForDocument polls /api/tasks/ for the given task UUID until it reaches
+// a terminal state or the timeout elapses. On SUCCESS it returns the
+// related_document ID. The context can be used to cancel the poll early.
+func (c *PaperlessClient) WaitForDocument(ctx context.Context, taskID string, timeout time.Duration) (int, error) {
+	deadline := time.Now().Add(timeout)
+	pollPath := fmt.Sprintf("/api/tasks/?task_id=%s", url.QueryEscape(taskID))
+
+	for {
+		done, id, err := c.checkTask(pollPath, taskID)
+		if err != nil {
+			return 0, err
+		}
+		if done {
+			return id, nil
+		}
+
+		if time.Now().After(deadline) {
+			return 0, &ErrTaskTimeout{TaskID: taskID}
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(c.taskPollInterval):
+		}
+	}
+}
+
+// checkTask performs a single poll. done=true means we got a terminal result.
+func (c *PaperlessClient) checkTask(pollPath, taskID string) (done bool, docID int, err error) {
+	resp, err := c.doRequest(http.MethodGet, pollPath, nil, "")
+	if err != nil {
+		return false, 0, fmt.Errorf("polling task: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return false, 0, fmt.Errorf("polling task: status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var tasks []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
+		return false, 0, fmt.Errorf("decoding task response: %w", err)
+	}
+	if len(tasks) == 0 {
+		return false, 0, nil
+	}
+	task := tasks[0]
+	status, _ := task["status"].(string)
+	switch status {
+	case "SUCCESS":
+		related, ok := task["related_document"].(float64)
+		if !ok {
+			return false, 0, fmt.Errorf("task %s SUCCESS without related_document", taskID)
+		}
+		return true, int(related), nil
+	case "FAILURE":
+		result, _ := task["result"].(string)
+		return false, 0, &ErrTaskFailed{TaskID: taskID, Result: result}
+	default:
+		return false, 0, nil
 	}
 }
 
