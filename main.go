@@ -168,7 +168,7 @@ func handleDocumentUpload(w http.ResponseWriter, r *http.Request, client *Paperl
 		return
 	}
 
-	storagePathPattern := fmt.Sprintf("/%s/{{ created_year }}/{{ correspondent }}/{{ title }}", docReq.Recipient)
+	storagePathPattern := fmt.Sprintf("/{{ document_type }}/%s/{{ created_year }}/{{ correspondent }}/{{ title }}", docReq.Recipient)
 	storagePathID, err := client.GetOrCreateStoragePath(docReq.Recipient, storagePathPattern)
 	if err != nil {
 		paperlessErr(w, "storage_path", err)

@@ -151,5 +151,5 @@ Health check endpoint. Returns `{"status": "ok"}`.
 ### Storage Path Pattern
 
 ```
-/{Recipient}/{{ created_year }}/{{ correspondent }}/{{ title }}
+/{{ document_type }}/{Recipient}/{{ created_year }}/{{ correspondent }}/{{ title }}
 ```
