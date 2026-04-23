@@ -134,14 +134,13 @@ Health check endpoint. Returns `{"status": "ok"}`.
 | DocumentDate | created |
 | Correspondent | correspondent (auto-created) |
 | DocumentType | document_type (auto-created) |
-| Recipient | Recipient custom field (auto-created) |
+| Recipient | storage_path name (auto-created) |
 | Tags[] | tags (auto-created) |
 
 ### Custom Fields (auto-created)
 
 | Field | Paperless Type |
 |-------|---------------|
-| Recipient | string |
 | DocumentLanguageCode | string |
 | ShortSummary | longtext |
 | LongSummary | longtext |
@@ -149,14 +148,15 @@ Health check endpoint. Returns `{"status": "ok"}`.
 | RecipientDetails | longtext |
 | CorrespondentDetails | longtext |
 
-### Storage Path
+### Storage Path Pattern
 
-All documents are filed under a single shared Paperless `storage_paths`
-entity named `Default`, whose template uses the `Recipient` custom field to
-branch per recipient at write time:
+One `storage_paths` entity is created per Recipient (Paperless has no
+`{{ Recipient }}` placeholder, so the recipient is baked into the path at
+creation time). The template, with `<Recipient>` substituted with the actual
+recipient name:
 
 ```
-/{{ custom_fields|get_cf_value("Recipient") }}/{{ created_year }}/{{ document_type }}/{{ created_year }}/{{ correspondent }}/{{ title }}
+/<Recipient>/{{ created_year }}/{{ document_type }}/{{ created_year }}/{{ correspondent }}/{{ title }}
 ```
 
 Paperless appends the file extension automatically, so `ProposedFilename`'s

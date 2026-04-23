@@ -18,16 +18,6 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// defaultStoragePathName is the single shared Paperless storage_paths entity
-// that every document is filed under. Per-recipient branching is expressed in
-// the path template below, via the Recipient custom field.
-const defaultStoragePathName = "Default"
-
-// defaultStoragePathPattern is the Paperless storage path template applied to
-// all documents. Recipient is referenced through the Recipient custom field
-// because Paperless has no built-in {{ Recipient }} placeholder.
-const defaultStoragePathPattern = `/{{ custom_fields|get_cf_value("Recipient") }}/{{ created_year }}/{{ document_type }}/{{ created_year }}/{{ correspondent }}/{{ title }}`
-
 func main() {
 	// Load .env file (ignore error if not present — env vars may be set directly)
 	godotenv.Load()
@@ -179,6 +169,20 @@ func handleDocumentUpload(w http.ResponseWriter, r *http.Request, client *Paperl
 		return
 	}
 
+	// One storage_paths entity per Recipient, named after the Recipient itself.
+	// Paperless has no built-in {{ Recipient }} placeholder, so the recipient
+	// folder is baked into the path at creation time via fmt.Sprintf and the
+	// remaining placeholders are rendered by Paperless at file-write time.
+	storagePathPattern := fmt.Sprintf(
+		"/%s/{{ created_year }}/{{ document_type }}/{{ created_year }}/{{ correspondent }}/{{ title }}",
+		docReq.Recipient,
+	)
+	storagePathID, err := client.GetOrCreateStoragePath(docReq.Recipient, storagePathPattern)
+	if err != nil {
+		paperlessErr(w, "storage_path", err)
+		return
+	}
+
 	// User tags + sha256 dedup tag. docReq.Tags is already deduped above; we
 	// just append the sha256 tag and re-dedup defensively.
 	allTags := dedupTagNames(append(append([]string{}, docReq.Tags...), "sha256:"+docReq.SHA256Hash))
@@ -199,7 +203,6 @@ func handleDocumentUpload(w http.ResponseWriter, r *http.Request, client *Paperl
 		Value    any
 	}
 	fieldDefs := []customFieldDef{
-		{"Recipient", "string", docReq.Recipient},
 		{"DocumentLanguageCode", "string", docReq.DocumentLanguageCode},
 		{"ShortSummary", "longtext", docReq.ShortSummary},
 		{"LongSummary", "longtext", docReq.LongSummary},
@@ -218,15 +221,6 @@ func handleDocumentUpload(w http.ResponseWriter, r *http.Request, client *Paperl
 			return
 		}
 		customFields[fmt.Sprintf("%d", fieldID)] = fd.Value
-	}
-
-	// Single default storage_paths entity referenced by every document. Its
-	// template uses the Recipient custom field (created above) to branch by
-	// recipient at file-write time.
-	storagePathID, err := client.GetOrCreateStoragePath(defaultStoragePathName, defaultStoragePathPattern)
-	if err != nil {
-		paperlessErr(w, "storage_path", err)
-		return
 	}
 
 	// Paperless appends the file extension when writing to disk, so the title
